@@ -1,0 +1,177 @@
+{-# LANGUAGE DataKinds             #-}
+{-# LANGUAGE DeriveAnyClass        #-}
+{-# LANGUAGE DeriveGeneric         #-}
+{-# LANGUAGE FlexibleContexts      #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE NoImplicitPrelude     #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE TemplateHaskell       #-}
+{-# LANGUAGE TypeApplications      #-}
+{-# LANGUAGE TypeFamilies          #-}
+{-# LANGUAGE TypeOperators         #-}
+
+{-# OPTIONS_GHC -fno-warn-unused-imports #-}
+
+module Accusation.Token_Distribution
+
+import           Control.Monad        hiding (fmap)
+import           Data.Aeson           (ToJSON, FromJSON)
+import           Data.Map             as Map
+import           Data.Text            (Text)
+import           Data.Void            (Void)
+import           GHC.Generics         (Generic)
+import           Plutus.Contract
+import           PlutusTx             (Data (..))
+import qualified PlutusTx
+import           PlutusTx.Prelude     hiding (Semigroup(..), unless)
+import           Ledger               hiding (singleton)
+import           Ledger.Constraints   as Constraints
+import qualified Ledger.Typed.Scripts as Scripts
+import           Ledger.Ada           as Ada
+import           Playground.Contract  (printJson, printSchemas, ensureKnownCurrencies, stage, ToSchema)
+import           Playground.TH        (mkKnownCurrencies, mkSchemaDefinitions)
+import           Playground.Types     (KnownCurrency (..))
+import           Prelude              (IO, Semigroup (..), Show (..), String)
+import           Text.Printf          (printf)
+
+import Membership.Signature
+import Membership.Account
+import Membership.PlatformSettings (PlatformSettings (..))
+import Membership.OnChain.Contract
+import Membership.OffChain.Account
+
+
+--JudgeInputsParam, data type with all predicate inputs (Bool) provided by the selected judge, the first in the list if available 
+
+data JudgeInputsParam  = JudgeInputsParam
+   	    { judgeSelected	= pkh
+    	    , jInput1 		 :: ByteString
+    	    , jInput2			 :: ByteString
+    	    , jInput3 		 :: ByteString
+    	    , deadline    		 :: POSIXTime
+    	    } deriving (Show, Generic, ToJSON, FromJSON, ToSchema, Prelude.Eq, Prelude.Ord)
+
+PlutusTx.makeLift '' JudgeInputs
+
+---Validator with 3 inputs from Judge 
+{-# INLINABLE mkInputValidator #-}
+mkInputValidator ::  ByteString -> ByteString -> ByteString -> () -> () -> ScriptContext -> Bool
+mkInputValidator ji () () ctx = traceIfFalse "judge inputs are missing" signedByjudgeInputs   &&
+                           traceIfFalse "deadline is over" deadlineReached
+  where
+    info :: TxInfo
+    info = scriptContextTxInfo ctx
+
+   signedByjudgeInputs :: Bool
+   signedByjudgeInputs =  txSignedBy info $ judgeSelected ji
+
+   deadlineReached :: Bool
+   deadlineReached = contains (from $ deadline ji) $ txInfoValidRange info
+
+
+
+data InputChoice = Zero | One
+    deriving (Show, Generic, FromJSON, ToJSON, ToSchema, Prelude.Eq, Prelude.Ord)
+
+instance Eq InputChoice where
+    {-# INLINABLE (==) #-}
+    Zero == Zero = True
+    One  == One  = False
+
+PlutusTx.unstableMakeIsData ''InputChoice
+
+data JudgeInputs
+instance Scripts.ValidatorTypes JudgeInputs where
+    type instance DatumType JudgeInputs = ()
+    type instance RedeemerType JudgeInputs = ()
+
+typedValidator :: JudgeInputsParam -> Scripts.TypedValidator JudgeInputs
+typedValidator ji = Scripts.mkTypedValidator @ JudgeInputs
+    ($$(PlutusTx.compile [|| mkValidator ||]) `PlutusTx.applyCode` PlutusTx.liftCode ji)
+    $$(PlutusTx.compile [|| wrap ||])
+  where
+    wrap = Scripts.wrapValidator @() @()
+
+validator :: JudgeInputsParam -> Validator
+validator = Scripts.validatorScript . typedValidator
+
+valHash :: JudgeInputsParam -> Ledger.ValidatorHash
+valHash = Scripts.validatorHash . typedValidator
+
+-- Collateral token are allocated between the two parties depending on the judge output, Inputs 1 to 3
+
+data TokenDistribParam = TokenDistribParam
+    { Accuser	 	:: !PubKeyHash
+    , Accused	 	:: !PubKeyHash    
+    , TotAmount        :: !Integer
+    , AmountAccuser       :: !Integer
+    , AmountAccused        :: !Integer
+    } deriving (Show, Generic, ToJSON, FromJSON, ToSchema, Prelude.Eq, Prelude.Ord)
+
+type JudgeInputsSchema =
+            Endpoint " tokenDistribParams " TokenDistribParams
+---------------------------------------------------
+----  On Chain --- Token distribution is set based on 3 judges inputs (3 Bool)
+
+token_distrib :: forall w s. TokenDistribParam -> JudgeInputsParam ->  Bool -> Bool  -> Bool -> Contract w s Text ()
+ 	--- Contraints to be added
+--- How to implement 'mustPayToTheScript ()' for two different accounts ? that is Accussed and Accuser have to receive both a part of the token
+token_distrib td = do
+	pkh <- pubKeyHash <$> Contract.ownPubKey
+	let judgeInputsParam = JudgeInputsParam 
+
+	    { judgeSelected	= pkh
+    	    , jInput1   = i1 td	 
+    	    , jInput2	  = i2	td	 
+    	    , jInput3   = i3 td	 
+    	    , deadline  = dl td		
+    	    } deriving (Show, Generic, ToJSON, FromJSON, ToSchema, Prelude.Eq, Prelude.Ord)
+
+	let tokenDistribParam = TokenDistribParam
+{ Accuser    = tdpAccuser td	 
+ , Accused  = tdpAccused td    
+ , TotAmount   =  tdpTotAmount td
+ , AmountAccuser = tdp AmountAccuser td
+ , AmountAccused = tdp AmountAccused td   
+ } deriving (Show, Generic, ToJSON, FromJSON, ToSchema, Prelude.Eq, Prelude.Ord)
+
+    logInfo @String $ printf "following tokens are going to be allocated:  %d lovelace "
+ (tdpTotAmount td)
+	--- findjudgeInputsParam to be added
+
+m <- findjudgeInputsParam
+case m of
+	Nothing 	-> throwError "No inputs"
+	Just (0,0,0)  --- all work was done perfectly by service provider
+    tx = mustPayToTheScript () $ Ada.lovelaceValueOf $ tdp AmountAccused td
+    ledgerTx <- submitTxConstraints (typedValidator ji) tx
+    void $ awaitTxConfirmed $ txId ledgerTx
+logInfo @String $ printf "Accusation tokens are allocated as follows:  %d lovelace    to %s "
+         (tdpTotAmount td)
+                (show tdp AmountAccused td)
+--- work was not fully done according to requirements by service provider: 
+     One input is negative -> 50% of fees is paid back to client and all trust token paid back to  client as well
+Just (0,0,1)  
+ tdp AmountAccused td = tdpTotAmount td `div` 2
+
+    tx = mustPayToTheScript () $ Ada.lovelaceValueOf $ tdp AmountAccused td
+    ledgerTx <- submitTxConstraints (typedValidator ji) tx
+    void $ awaitTxConfirmed $ txId ledgerTx
+logInfo @String $ printf "Accusation tokens are allocated as follows:  %d lovelace    to %s , %d lovelace    to %s  " 
+          (tdp AmountAccuser td)
+		      (tdp AmountAccused td)
+			    (show tdp AmountAccused td)
+          (show tdp AmountAccused td)
+
+
+      
+
+
+
+
+
+
+
+
+

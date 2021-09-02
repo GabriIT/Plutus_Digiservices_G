@@ -47,9 +47,9 @@ import Membership.OffChain.Account
 data JudgeInputsParam  = JudgeInputsParam
    	    { judgeSelected	= pkh
     	    , jInput1 		 :: ByteString
-    	    , jInput2			 :: ByteString
+    	    , jInput2		 :: ByteString
     	    , jInput3 		 :: ByteString
-    	    , deadline    		 :: POSIXTime
+    	    , deadline    	 :: POSIXTime
     	    } deriving (Show, Generic, ToJSON, FromJSON, ToSchema, Prelude.Eq, Prelude.Ord)
 
 PlutusTx.makeLift '' JudgeInputs
@@ -115,7 +115,7 @@ type JudgeInputsSchema =
 ----  On Chain --- Token distribution is set based on 3 judges inputs (3 Bool)
 
 token_distrib :: forall w s. TokenDistribParam -> JudgeInputsParam ->  Bool -> Bool  -> Bool -> Contract w s Text ()
- 	--- Contraints to be added
+-- Contraints to be added
 --- How to implement 'mustPayToTheScript ()' for two different accounts ? that is Accussed and Accuser have to receive both a part of the token
 token_distrib td = do
 	pkh <- pubKeyHash <$> Contract.ownPubKey
@@ -129,39 +129,38 @@ token_distrib td = do
     	    } deriving (Show, Generic, ToJSON, FromJSON, ToSchema, Prelude.Eq, Prelude.Ord)
 
 	let tokenDistribParam = TokenDistribParam
-{ Accuser    = tdpAccuser td	 
- , Accused  = tdpAccused td    
- , TotAmount   =  tdpTotAmount td
- , AmountAccuser = tdp AmountAccuser td
- , AmountAccused = tdp AmountAccused td   
- } deriving (Show, Generic, ToJSON, FromJSON, ToSchema, Prelude.Eq, Prelude.Ord)
+		{ Accuser    = tdpAccuser td	 
+		, Accused  = tdpAccused td    
+ 		, TotAmount   =  tdpTotAmount td
+ 		, AmountAccuser = tdp AmountAccuser td
+ 		, AmountAccused = tdp AmountAccused td   
+ 		} deriving (Show, Generic, ToJSON, FromJSON, ToSchema, Prelude.Eq, Prelude.Ord)
 
     logInfo @String $ printf "following tokens are going to be allocated:  %d lovelace "
- (tdpTotAmount td)
-	--- findjudgeInputsParam to be added
+      (tdpTotAmount td)
+-- findjudgeInputsParam to be added
 
 m <- findjudgeInputsParam
 case m of
 	Nothing 	-> throwError "No inputs"
 	Just (0,0,0)  --- all work was done perfectly by service provider
-    tx = mustPayToTheScript () $ Ada.lovelaceValueOf $ tdp AmountAccused td
-    ledgerTx <- submitTxConstraints (typedValidator ji) tx
-    void $ awaitTxConfirmed $ txId ledgerTx
-logInfo @String $ printf "Accusation tokens are allocated as follows:  %d lovelace    to %s "
+        tx = mustPayToTheScript () $ Ada.lovelaceValueOf $ tdp AmountAccused td
+        ledgerTx <- submitTxConstraints (typedValidator ji) tx
+        void $ awaitTxConfirmed $ txId ledgerTx
+        logInfo @String $ printf "Accusation tokens are allocated as follows:  %d lovelace    to %s "
          (tdpTotAmount td)
                 (show tdp AmountAccused td)
 --- work was not fully done according to requirements by service provider: 
      One input is negative -> 50% of fees is paid back to client and all trust token paid back to  client as well
-Just (0,0,1)  
- tdp AmountAccused td = tdpTotAmount td `div` 2
-
+  Just (0,0,1)  
+      tdp AmountAccused td = tdpTotAmount td `div` 2
     tx = mustPayToTheScript () $ Ada.lovelaceValueOf $ tdp AmountAccused td
     ledgerTx <- submitTxConstraints (typedValidator ji) tx
     void $ awaitTxConfirmed $ txId ledgerTx
-logInfo @String $ printf "Accusation tokens are allocated as follows:  %d lovelace    to %s , %d lovelace    to %s  " 
+   logInfo @String $ printf "Accusation tokens are allocated as follows:  %d lovelace    to %s , %d lovelace    to %s  " 
           (tdp AmountAccuser td)
-		      (tdp AmountAccused td)
-			    (show tdp AmountAccused td)
+	  (tdp AmountAccused td)
+	  (show tdp AmountAccused td)
           (show tdp AmountAccused td)
 
 
